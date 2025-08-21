@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
 import { Upload, Search, Loader2 } from "lucide-react"
-import Tesseract from "tesseract.js"
+import Tesseract, { createWorker, PSM } from "tesseract.js"
 
 interface DetectedWord {
   text: string
@@ -42,6 +42,31 @@ export default function KeywordDetector() {
     }
   }
 
+  function parseHOCR(hocr: string) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(hocr, "text/html");
+
+    const words: { text: string; bbox: { x0: number; y0: number; x1: number; y1: number } }[] = [];
+
+    doc.querySelectorAll(".ocrx_word").forEach((el) => {
+      const text = el.textContent?.trim() || "";
+      const title = el.getAttribute("title") || "";
+      const match = title.match(/bbox (\d+) (\d+) (\d+) (\d+)/);
+
+      if (match) {
+        const [, x0, y0, x1, y1] = match.map(Number);
+        words.push({
+          text,
+          bbox: { x0, y0, x1, y1 },
+        });
+      }
+    });
+
+    return words;
+  }
+
+
+
   const processImage = async () => {
     if (!image || !keywords.trim()) return
 
@@ -51,17 +76,17 @@ export default function KeywordDetector() {
 
     try {
       console.log("[v0] Starting OCR processing...")
-      const { data } = await Tesseract.recognize(image, "eng", {
-        logger: (m) => console.log("[v0] OCR Progress:", m),
-        tessedit_pageseg_mode: Tesseract.PSM.AUTO,
-        tessedit_ocr_engine_mode: Tesseract.OEM.LSTM_ONLY,
-        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?-",
+      const worker = await createWorker("eng")
+      await worker.setParameters({
+        tessedit_pageseg_mode:PSM.SPARSE_TEXT
       })
+      const {data} = await worker.recognize(image,{}, {hocr:true})
 
       console.log("[v0] OCR completed, processing data structure...")
       console.log("[v0] Full OCR text detected:", data.text)
       console.log("[v0] OCR confidence:", data.confidence)
       console.log("[v0] Number of blocks:", data.blocks?.length || 0)
+      console.log("[v0] Full data structure:", JSON.stringify(data, null, 2))
 
       const keywordList = keywords
         .toLowerCase()
@@ -71,101 +96,15 @@ export default function KeywordDetector() {
 
       console.log("[v0] Keywords to search for:", keywordList)
 
-      const words: DetectedWord[] = []
       const matched: string[] = []
       let totalWordsFound = 0
 
-      if (data.blocks && data.blocks.length > 0) {
-        data.blocks.forEach((block, blockIndex) => {
-          console.log("[v0] Processing block", blockIndex, "with", block.paragraphs?.length || 0, "paragraphs")
-          if (block.paragraphs) {
-            block.paragraphs.forEach((paragraph, paragraphIndex) => {
-              if (paragraph.lines) {
-                paragraph.lines.forEach((line, lineIndex) => {
-                  if (line.words) {
-                    line.words.forEach((word, wordIndex) => {
-                      totalWordsFound++
-                      const wordText = word.text.toLowerCase().replace(/[^\w\s]/g, "")
-                      console.log("[v0] Found word:", word.text, "->", wordText, "bbox:", word.bbox)
-
-                      keywordList.forEach((keyword) => {
-                        if (wordText.includes(keyword) && keyword.length > 0) {
-                          console.log("[v0] MATCH! Word:", word.text, "matches keyword:", keyword)
-                          words.push({
-                            text: word.text,
-                            bbox: word.bbox,
-                          })
-                          if (!matched.includes(keyword)) {
-                            matched.push(keyword)
-                          }
-                        }
-                      })
-                    })
-                  }
-                })
-              }
-            })
-          }
-        })
-      } else if (data.text && data.text.trim()) {
-        console.log("[v0] Blocks structure empty, parsing raw text...")
-        const textWords = data.text.split(/\s+/).filter((word) => word.trim().length > 0)
-        console.log("[v0] Raw text words found:", textWords.length)
-
-        // Create approximate bounding boxes for text-based matching
-        const imgElement = imageRef.current
-        if (imgElement) {
-          const imgWidth = imgElement.naturalWidth || 800
-          const imgHeight = imgElement.naturalHeight || 600
-
-          const estimatedLinesOfText = Math.ceil(textWords.length / 12) // ~12 words per line average
-          const lineHeight = Math.max(imgHeight / estimatedLinesOfText, 30) // minimum 30px line height
-          const avgWordWidth = imgWidth / 12 // average word width based on ~12 words per line
-
-          let currentLine = 0
-          let wordsInCurrentLine = 0
-          const maxWordsPerLine = Math.floor(imgWidth / avgWordWidth)
-
-          textWords.forEach((word, index) => {
-            totalWordsFound++
-            const wordText = word.toLowerCase().replace(/[^\w\s]/g, "")
-
-            if (wordsInCurrentLine >= maxWordsPerLine) {
-              currentLine++
-              wordsInCurrentLine = 0
-            }
-
-            const wordLength = word.length
-            const estimatedWordWidth = Math.max(wordLength * 12, 40) // ~12px per character, min 40px
-            const x = wordsInCurrentLine * avgWordWidth
-            const y = currentLine * lineHeight
-
-            console.log(
-              `[v0] Word "${word}" positioned at line ${currentLine}, position ${wordsInCurrentLine}, coords: (${x}, ${y})`,
-            )
-
-            keywordList.forEach((keyword) => {
-              if (wordText.includes(keyword) && keyword.length > 0) {
-                console.log("[v0] TEXT MATCH! Word:", word, "matches keyword:", keyword)
-                words.push({
-                  text: word,
-                  bbox: {
-                    x0: x,
-                    y0: y,
-                    x1: x + estimatedWordWidth,
-                    y1: y + lineHeight,
-                  },
-                })
-                if (!matched.includes(keyword)) {
-                  matched.push(keyword)
-                }
-              }
-            })
-
-            wordsInCurrentLine++
-          })
-        }
-      }
+      const words = parseHOCR(data.hocr || "").filter((word: DetectedWord) => keywordList.includes(word.text.toLowerCase()))
+      
+      // filter the words and collect only the matching texts
+      matched.push(
+        ...words.map((word: DetectedWord) => word.text)
+      )
 
       console.log("[v0] Total words detected by OCR:", totalWordsFound)
       console.log("[v0] Found", words.length, "matching words for keywords:", matched)
