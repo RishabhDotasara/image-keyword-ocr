@@ -53,25 +53,15 @@ export default function KeywordDetector() {
       console.log("[v0] Starting OCR processing...")
       const { data } = await Tesseract.recognize(image, "eng", {
         logger: (m) => console.log("[v0] OCR Progress:", m),
+        tessedit_pageseg_mode: Tesseract.PSM.AUTO,
+        tessedit_ocr_engine_mode: Tesseract.OEM.LSTM_ONLY,
+        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?-",
       })
 
       console.log("[v0] OCR completed, processing data structure...")
       console.log("[v0] Full OCR text detected:", data.text)
       console.log("[v0] OCR confidence:", data.confidence)
-
-      console.log("[v0] Full data object keys:", Object.keys(data))
-      console.log("[v0] Data.words exists:", !!data.words)
-      console.log("[v0] Data.words length:", data.words?.length || 0)
-      console.log("[v0] Data.blocks exists:", !!data.blocks)
-      console.log("[v0] Data.blocks length:", data.blocks?.length || 0)
-
-      if (data.words && data.words.length > 0) {
-        console.log("[v0] Sample word structure:", JSON.stringify(data.words[0], null, 2))
-      }
-
-      if (data.blocks && data.blocks.length > 0) {
-        console.log("[v0] Sample block structure:", JSON.stringify(data.blocks[0], null, 2))
-      }
+      console.log("[v0] Number of blocks:", data.blocks?.length || 0)
 
       const keywordList = keywords
         .toLowerCase()
@@ -83,71 +73,87 @@ export default function KeywordDetector() {
 
       const words: DetectedWord[] = []
       const matched: string[] = []
+      let totalWordsFound = 0
 
       if (data.blocks && data.blocks.length > 0) {
-        console.log("[v0] Processing blocks hierarchy for word-level bounding boxes...")
-
         data.blocks.forEach((block, blockIndex) => {
-          console.log(`[v0] Processing block ${blockIndex}`)
-          block.paragraphs?.forEach((paragraph, paragraphIndex) => {
-            console.log(`[v0] Processing paragraph ${paragraphIndex}`)
-            paragraph.lines?.forEach((line, lineIndex) => {
-              console.log(`[v0] Processing line ${lineIndex}`)
-              line.words?.forEach((word, wordIndex) => {
-                console.log(`[v0] Processing word ${wordIndex}: "${word.text}"`)
-                console.log(`[v0] Word bbox:`, word.bbox)
+          console.log("[v0] Processing block", blockIndex, "with", block.paragraphs?.length || 0, "paragraphs")
+          if (block.paragraphs) {
+            block.paragraphs.forEach((paragraph, paragraphIndex) => {
+              if (paragraph.lines) {
+                paragraph.lines.forEach((line, lineIndex) => {
+                  if (line.words) {
+                    line.words.forEach((word, wordIndex) => {
+                      totalWordsFound++
+                      const wordText = word.text.toLowerCase().replace(/[^\w\s]/g, "")
+                      console.log("[v0] Found word:", word.text, "->", wordText, "bbox:", word.bbox)
 
-                if (word.bbox && typeof word.bbox === "object") {
-                  const wordText = word.text.toLowerCase().replace(/[^\w\s]/g, "")
-
-                  keywordList.forEach((keyword) => {
-                    if (wordText.includes(keyword) && keyword.length > 0) {
-                      console.log("[v0] BBOX MATCH FOUND! Word:", word.text, "matches keyword:", keyword)
-                      console.log("[v0] Using real bbox coordinates:", word.bbox)
-
-                      words.push({
-                        text: word.text,
-                        bbox: {
-                          x0: word.bbox.x0,
-                          y0: word.bbox.y0,
-                          x1: word.bbox.x1,
-                          y1: word.bbox.y1,
-                        },
+                      keywordList.forEach((keyword) => {
+                        if (wordText.includes(keyword) && keyword.length > 0) {
+                          console.log("[v0] MATCH! Word:", word.text, "matches keyword:", keyword)
+                          words.push({
+                            text: word.text,
+                            bbox: word.bbox,
+                          })
+                          if (!matched.includes(keyword)) {
+                            matched.push(keyword)
+                          }
+                        }
                       })
-                      if (!matched.includes(keyword)) {
-                        matched.push(keyword)
-                      }
-                    }
-                  })
-                } else {
-                  console.log("[v0] Word has no bbox data:", word.text)
-                }
-              })
+                    })
+                  }
+                })
+              }
             })
-          })
+          }
         })
-      } else if (data.words && data.words.length > 0) {
-        console.log("[v0] Processing direct words array...")
+      } else if (data.text && data.text.trim()) {
+        console.log("[v0] Blocks structure empty, parsing raw text...")
+        const textWords = data.text.split(/\s+/).filter((word) => word.trim().length > 0)
+        console.log("[v0] Raw text words found:", textWords.length)
 
-        data.words.forEach((word, wordIndex) => {
-          console.log(`[v0] Direct word ${wordIndex}: "${word.text}"`)
-          console.log(`[v0] Direct word bbox:`, word.bbox)
+        // Create approximate bounding boxes for text-based matching
+        const imgElement = imageRef.current
+        if (imgElement) {
+          const imgWidth = imgElement.naturalWidth || 800
+          const imgHeight = imgElement.naturalHeight || 600
 
-          if (word.bbox && typeof word.bbox === "object") {
-            const wordText = word.text.toLowerCase().replace(/[^\w\s]/g, "")
+          const estimatedLinesOfText = Math.ceil(textWords.length / 12) // ~12 words per line average
+          const lineHeight = Math.max(imgHeight / estimatedLinesOfText, 30) // minimum 30px line height
+          const avgWordWidth = imgWidth / 12 // average word width based on ~12 words per line
+
+          let currentLine = 0
+          let wordsInCurrentLine = 0
+          const maxWordsPerLine = Math.floor(imgWidth / avgWordWidth)
+
+          textWords.forEach((word, index) => {
+            totalWordsFound++
+            const wordText = word.toLowerCase().replace(/[^\w\s]/g, "")
+
+            if (wordsInCurrentLine >= maxWordsPerLine) {
+              currentLine++
+              wordsInCurrentLine = 0
+            }
+
+            const wordLength = word.length
+            const estimatedWordWidth = Math.max(wordLength * 12, 40) // ~12px per character, min 40px
+            const x = wordsInCurrentLine * avgWordWidth
+            const y = currentLine * lineHeight
+
+            console.log(
+              `[v0] Word "${word}" positioned at line ${currentLine}, position ${wordsInCurrentLine}, coords: (${x}, ${y})`,
+            )
 
             keywordList.forEach((keyword) => {
               if (wordText.includes(keyword) && keyword.length > 0) {
-                console.log("[v0] DIRECT BBOX MATCH FOUND! Word:", word.text, "matches keyword:", keyword)
-                console.log("[v0] Using real bbox coordinates:", word.bbox)
-
+                console.log("[v0] TEXT MATCH! Word:", word, "matches keyword:", keyword)
                 words.push({
-                  text: word.text,
+                  text: word,
                   bbox: {
-                    x0: word.bbox.x0,
-                    y0: word.bbox.y0,
-                    x1: word.bbox.x1,
-                    y1: word.bbox.y1,
+                    x0: x,
+                    y0: y,
+                    x1: x + estimatedWordWidth,
+                    y1: y + lineHeight,
                   },
                 })
                 if (!matched.includes(keyword)) {
@@ -155,36 +161,18 @@ export default function KeywordDetector() {
                 }
               }
             })
-          } else {
-            console.log("[v0] Direct word has no bbox data:", word.text)
-          }
-        })
-      } else {
-        console.log("[v0] No structured word data available - using text-only matching without bounding boxes")
-        if (data.text && data.text.trim()) {
-          const textWords = data.text.toLowerCase().split(/\s+/)
-          keywordList.forEach((keyword) => {
-            textWords.forEach((textWord) => {
-              const cleanWord = textWord.replace(/[^\w]/g, "")
-              if (cleanWord.includes(keyword) && keyword.length > 0) {
-                console.log("[v0] Text-based match found:", textWord, "contains", keyword)
-                if (!matched.includes(keyword)) {
-                  matched.push(keyword)
-                }
-              }
-            })
+
+            wordsInCurrentLine++
           })
         }
       }
 
-      console.log("[v0] Total words with bounding boxes found:", words.length)
-      console.log("[v0] Matched keywords:", matched)
+      console.log("[v0] Total words detected by OCR:", totalWordsFound)
+      console.log("[v0] Found", words.length, "matching words for keywords:", matched)
 
       setDetectedWords(words)
       setMatchedKeywords(matched)
-      if (words.length > 0) {
-        drawBoundingBoxes(words)
-      }
+      drawBoundingBoxes(words)
     } catch (error) {
       console.error("[v0] OCR Error:", error)
     } finally {
@@ -223,8 +211,10 @@ export default function KeywordDetector() {
     )
     console.log("[v0] Scale factors - X:", scaleX, "Y:", scaleY)
 
+    // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
+    // Draw bounding boxes
     ctx.strokeStyle = "#ef4444"
     ctx.lineWidth = 2
     ctx.fillStyle = "rgba(239, 68, 68, 0.2)"
@@ -244,7 +234,9 @@ export default function KeywordDetector() {
         `[v0] Drawing box ${index}: Original (${x0}, ${y0}, ${x1}, ${y1}) -> Scaled (${scaledX0}, ${scaledY0}, ${scaledX1}, ${scaledY1})`,
       )
 
+      // Draw filled rectangle
       ctx.fillRect(scaledX0, scaledY0, width, height)
+      // Draw border
       ctx.strokeRect(scaledX0, scaledY0, width, height)
     })
   }
